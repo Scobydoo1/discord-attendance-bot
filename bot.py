@@ -45,11 +45,13 @@ def today_key() -> str:
 
 def load_data():
     global attendance_data
+    os.makedirs(os.path.dirname(ATTENDANCE_FILE) or ".", exist_ok=True)
     if os.path.exists(ATTENDANCE_FILE):
         with open(ATTENDANCE_FILE, "r", encoding="utf-8") as f:
             attendance_data = json.load(f)
 
 def save_data():
+    os.makedirs(os.path.dirname(ATTENDANCE_FILE) or ".", exist_ok=True)
     with open(ATTENDANCE_FILE, "w", encoding="utf-8") as f:
         json.dump(attendance_data, f, indent=2, ensure_ascii=False)
 
