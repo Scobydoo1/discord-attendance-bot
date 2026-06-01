@@ -1,4 +1,5 @@
 import discord
+from discord import app_commands
 from discord.ext import commands, tasks
 from datetime import datetime, timezone, timedelta
 import json
@@ -16,12 +17,11 @@ GUILD_ID            = int(os.getenv("GUILD_ID", 0))
 ANNOUNCE_CHANNEL_ID = int(os.getenv("ANNOUNCE_CHANNEL_ID", 0))
 VOICE_CHANNEL_ID    = int(os.getenv("VOICE_CHANNEL_ID", 0))
 STUDY_ROLE_NAME     = os.getenv("STUDY_ROLE_NAME", "study")
-ANNOUNCE_HOUR       = int(os.getenv("ANNOUNCE_HOUR", 20))   # 8 PM
+ANNOUNCE_HOUR       = int(os.getenv("ANNOUNCE_HOUR", 20))
 ANNOUNCE_MINUTE     = int(os.getenv("ANNOUNCE_MINUTE", 0))
-LATE_GRACE_MINUTES  = int(os.getenv("LATE_GRACE_MINUTES", 15))  # after 8:15 = late
-TIMEZONE_OFFSET     = int(os.getenv("TIMEZONE_OFFSET", 7))  # UTC+7 Vietnam
+LATE_GRACE_MINUTES  = int(os.getenv("LATE_GRACE_MINUTES", 15))
+TIMEZONE_OFFSET     = int(os.getenv("TIMEZONE_OFFSET", 7))
 ATTENDANCE_FILE     = os.getenv("ATTENDANCE_FILE", "attendance.json")
-COMMAND_PREFIX      = os.getenv("COMMAND_PREFIX", "!")
 # ─────────────────────────────────────────────────────────────────────────────
 
 intents = discord.Intents.default()
@@ -29,9 +29,10 @@ intents.message_content = True
 intents.members = True
 intents.voice_states = True
 
-bot = commands.Bot(command_prefix=commands.when_mentioned_or(COMMAND_PREFIX), intents=intents)
+bot = commands.Bot(command_prefix="!", intents=intents)
+GUILD_OBJ = discord.Object(id=GUILD_ID)
 
-attendance_data: dict = {}  # { "YYYY-MM-DD": { expected, present, closed } }
+attendance_data: dict = {}
 
 
 # ── helpers ──────────────────────────────────────────────────────────────────
@@ -53,7 +54,6 @@ def save_data():
         json.dump(attendance_data, f, indent=2, ensure_ascii=False)
 
 def ensure_today(guild: discord.Guild):
-    """Make sure today's attendance record exists."""
     key = today_key()
     if key not in attendance_data:
         study_role = discord.utils.get(guild.roles, name=STUDY_ROLE_NAME)
@@ -62,7 +62,7 @@ def ensure_today(guild: discord.Guild):
             expected = [str(m.id) for m in study_role.members if not m.bot]
         attendance_data[key] = {
             "expected": expected,
-            "present":  {},   # { member_id: { name, join_time, late, manual } }
+            "present":  {},
             "closed":   False
         }
         save_data()
@@ -81,7 +81,10 @@ async def on_ready():
     load_data()
     if not daily_announce.is_running():
         daily_announce.start()
-    print(f"✅  {bot.user} is online! Prefix: !")
+    bot.tree.copy_global_to(guild=GUILD_OBJ)
+    await bot.tree.sync(guild=GUILD_OBJ)
+    print(f"✅  {bot.user} is online!")
+    print(f"   Slash commands synced to guild {GUILD_ID}")
     print(f"   Announce at {ANNOUNCE_HOUR:02d}:{ANNOUNCE_MINUTE:02d} UTC+{TIMEZONE_OFFSET}")
 
 
@@ -97,15 +100,14 @@ async def daily_announce():
     if not guild:
         return
 
-    channel   = guild.get_channel(ANNOUNCE_CHANNEL_ID)
-    vc        = guild.get_channel(VOICE_CHANNEL_ID)
-    role      = discord.utils.get(guild.roles, name=STUDY_ROLE_NAME)
+    channel = guild.get_channel(ANNOUNCE_CHANNEL_ID)
+    vc      = guild.get_channel(VOICE_CHANNEL_ID)
+    role    = discord.utils.get(guild.roles, name=STUDY_ROLE_NAME)
 
     if not channel or not role:
         return
 
-    key = ensure_today(guild)    # creates today's record
-
+    key = ensure_today(guild)
     vc_mention = vc.mention if vc else "**phòng học**"
 
     embed = discord.Embed(
@@ -114,7 +116,7 @@ async def daily_announce():
             f"Xin chào {role.mention}!\n\n"
             f"🕗 Bây giờ là **{ANNOUNCE_HOUR:02d}:{ANNOUNCE_MINUTE:02d}** — hãy vào {vc_mention} để điểm danh.\n"
             f"⏰ Điểm danh sau **{LATE_GRACE_MINUTES} phút** sẽ bị ghi muộn.\n\n"
-            f"Dùng `{COMMAND_PREFIX}attendance` để xem danh sách điểm danh."
+            f"Dùng `/attendance` để xem danh sách điểm danh."
         ),
         color=discord.Color.blurple()
     )
@@ -137,11 +139,11 @@ async def on_voice_state_update(member: discord.Member, before: discord.VoiceSta
 
     key = ensure_today(member.guild)
     if attendance_data[key].get("closed"):
-        return   # attendance closed
+        return
 
     member_id = str(member.id)
     if member_id in attendance_data[key]["present"]:
-        return   # already marked
+        return
 
     now = local_now()
     attendance_data[key]["present"][member_id] = {
@@ -151,13 +153,11 @@ async def on_voice_state_update(member: discord.Member, before: discord.VoiceSta
         "manual":    False
     }
 
-    # Add to expected if not there (joined after init)
     if member_id not in attendance_data[key]["expected"]:
         attendance_data[key]["expected"].append(member_id)
 
     save_data()
 
-    # Optional: send a small DM confirmation
     try:
         late_note = " (muộn ⏰)" if is_late(now) else ""
         await member.send(f"✅ Đã ghi nhận điểm danh của bạn lúc **{now.strftime('%H:%M')}**{late_note}!")
@@ -165,21 +165,21 @@ async def on_voice_state_update(member: discord.Member, before: discord.VoiceSta
         pass
 
 
-# ── commands ──────────────────────────────────────────────────────────────────
+# ── slash commands ────────────────────────────────────────────────────────────
 
-@bot.command(name="attendance", aliases=["dd"])
-@commands.has_permissions(manage_messages=True)
-async def cmd_attendance(ctx: commands.Context, date: str = None):
-    """Show attendance for today (or a given YYYY-MM-DD date). Admin only."""
-    key = date or today_key()
-    guild = ctx.guild
+@bot.tree.command(name="attendance", description="Xem điểm danh hôm nay hoặc ngày cụ thể (admin)", guild=GUILD_OBJ)
+@app_commands.default_permissions(manage_messages=True)
+@app_commands.describe(date="Ngày cần xem YYYY-MM-DD, để trống = hôm nay")
+async def slash_attendance(interaction: discord.Interaction, date: str = None):
+    key   = date or today_key()
+    guild = interaction.guild
 
     if key not in attendance_data:
-        await ctx.send(f"❌ Không có dữ liệu điểm danh cho ngày `{key}`.")
+        await interaction.response.send_message(f"❌ Không có dữ liệu điểm danh cho ngày `{key}`.", ephemeral=True)
         return
 
-    data    = attendance_data[key]
-    present = data["present"]
+    data         = attendance_data[key]
+    present      = data["present"]
     expected_ids = data["expected"]
 
     present_lines = []
@@ -191,15 +191,15 @@ async def cmd_attendance(ctx: commands.Context, date: str = None):
     absent_lines = []
     for uid in expected_ids:
         if uid not in present:
-            m = guild.get_member(int(uid))
+            m    = guild.get_member(int(uid))
             name = m.display_name if m else f"(id:{uid})"
             absent_lines.append(f"❌ {name}")
 
-    total    = len(expected_ids)
-    n_pres   = len(present_lines)
-    n_abs    = len(absent_lines)
-    n_late   = sum(1 for v in present.values() if v.get("late"))
-    closed   = " 🔒 (đã đóng)" if data.get("closed") else ""
+    total  = len(expected_ids)
+    n_pres = len(present_lines)
+    n_abs  = len(absent_lines)
+    n_late = sum(1 for v in present.values() if v.get("late"))
+    closed = " 🔒 (đã đóng)" if data.get("closed") else ""
 
     embed = discord.Embed(
         title=f"📋 Điểm danh — {key}{closed}",
@@ -216,31 +216,29 @@ async def cmd_attendance(ctx: commands.Context, date: str = None):
         inline=False
     )
     embed.set_footer(text="✏️ = điểm danh thủ công  |  ⏰ = muộn")
-    await ctx.send(embed=embed)
+    await interaction.response.send_message(embed=embed)
 
 
-@bot.command(name="myattendance", aliases=["mydd"])
-async def cmd_my_attendance(ctx: commands.Context, days: int = 7):
-    """Show your own attendance history for the last N days."""
-    uid    = str(ctx.author.id)
-    lines  = []
-    keys   = sorted(attendance_data.keys(), reverse=True)[:days]
+@bot.tree.command(name="myattendance", description="Xem lịch sử điểm danh của bạn", guild=GUILD_OBJ)
+@app_commands.describe(days="Số ngày gần nhất (mặc định: 7)")
+async def slash_my_attendance(interaction: discord.Interaction, days: int = 7):
+    uid  = str(interaction.user.id)
+    lines = []
+    keys  = sorted(attendance_data.keys(), reverse=True)[:days]
 
     for key in keys:
-        data    = attendance_data[key]
-        present = data["present"]
+        data     = attendance_data[key]
+        present  = data["present"]
         expected = data["expected"]
-
         if uid in present:
             info     = present[uid]
             late_tag = " ⏰" if info.get("late") else ""
             lines.append(f"✅ **{key}** — {info['join_time']}{late_tag}")
         elif uid in expected:
             lines.append(f"❌ **{key}** — Vắng mặt")
-        # else: wasn't expected that day → skip
 
     if not lines:
-        await ctx.send("Không tìm thấy dữ liệu điểm danh của bạn.")
+        await interaction.response.send_message("Không tìm thấy dữ liệu điểm danh của bạn.", ephemeral=True)
         return
 
     attended = sum(1 for l in lines if l.startswith("✅"))
@@ -248,19 +246,19 @@ async def cmd_my_attendance(ctx: commands.Context, days: int = 7):
     rate     = int(attended / total * 100) if total else 0
 
     embed = discord.Embed(
-        title=f"📊 Lịch sử điểm danh — {ctx.author.display_name}",
+        title=f"📊 Lịch sử điểm danh — {interaction.user.display_name}",
         description="\n".join(lines),
         color=discord.Color.blue()
     )
     embed.set_footer(text=f"Tỉ lệ đi học: {attended}/{total} ngày ({rate}%)")
-    await ctx.send(embed=embed)
+    await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
-@bot.command(name="mark")
-@commands.has_permissions(manage_roles=True)
-async def cmd_mark(ctx: commands.Context, member: discord.Member):
-    """Manually mark a member as present today. Admin only."""
-    key = ensure_today(ctx.guild)
+@bot.tree.command(name="mark", description="Điểm danh thủ công cho thành viên (admin)", guild=GUILD_OBJ)
+@app_commands.default_permissions(manage_roles=True)
+@app_commands.describe(member="Thành viên cần điểm danh")
+async def slash_mark(interaction: discord.Interaction, member: discord.Member):
+    key = ensure_today(interaction.guild)
     uid = str(member.id)
     now = local_now()
 
@@ -274,36 +272,35 @@ async def cmd_mark(ctx: commands.Context, member: discord.Member):
         attendance_data[key]["expected"].append(uid)
 
     save_data()
-    await ctx.send(f"✅ Đã điểm danh thủ công cho **{member.display_name}**.")
+    await interaction.response.send_message(f"✅ Đã điểm danh thủ công cho **{member.display_name}**.")
 
 
-@bot.command(name="unmark")
-@commands.has_permissions(manage_roles=True)
-async def cmd_unmark(ctx: commands.Context, member: discord.Member):
-    """Remove a member's attendance for today. Admin only."""
+@bot.tree.command(name="unmark", description="Xoá điểm danh của thành viên hôm nay (admin)", guild=GUILD_OBJ)
+@app_commands.default_permissions(manage_roles=True)
+@app_commands.describe(member="Thành viên cần xoá điểm danh")
+async def slash_unmark(interaction: discord.Interaction, member: discord.Member):
     key = today_key()
     uid = str(member.id)
 
     if key in attendance_data and uid in attendance_data[key]["present"]:
         del attendance_data[key]["present"][uid]
         save_data()
-        await ctx.send(f"🗑️ Đã xoá điểm danh của **{member.display_name}** hôm nay.")
+        await interaction.response.send_message(f"🗑️ Đã xoá điểm danh của **{member.display_name}** hôm nay.")
     else:
-        await ctx.send(f"❌ **{member.display_name}** chưa được điểm danh hôm nay.")
+        await interaction.response.send_message(f"❌ **{member.display_name}** chưa được điểm danh hôm nay.", ephemeral=True)
 
 
-@bot.command(name="initdd")
-@commands.has_permissions(manage_roles=True)
-async def cmd_init(ctx: commands.Context):
-    """Manually initialise today's attendance with all 'study' role members."""
-    guild      = ctx.guild
+@bot.tree.command(name="initdd", description="Khởi tạo danh sách điểm danh hôm nay từ role (admin)", guild=GUILD_OBJ)
+@app_commands.default_permissions(manage_roles=True)
+async def slash_initdd(interaction: discord.Interaction):
+    guild      = interaction.guild
     study_role = discord.utils.get(guild.roles, name=STUDY_ROLE_NAME)
 
     if not study_role:
-        await ctx.send(f"❌ Không tìm thấy role `{STUDY_ROLE_NAME}`.")
+        await interaction.response.send_message(f"❌ Không tìm thấy role `{STUDY_ROLE_NAME}`.", ephemeral=True)
         return
 
-    key = today_key()
+    key      = today_key()
     expected = [str(m.id) for m in study_role.members if not m.bot]
     attendance_data[key] = {
         "expected": expected,
@@ -311,48 +308,43 @@ async def cmd_init(ctx: commands.Context):
         "closed":   False
     }
     save_data()
-    await ctx.send(f"✅ Khởi tạo điểm danh ngày **{key}** với **{len(expected)}** thành viên có role `{STUDY_ROLE_NAME}`.")
+    await interaction.response.send_message(
+        f"✅ Khởi tạo điểm danh ngày **{key}** với **{len(expected)}** thành viên có role `{STUDY_ROLE_NAME}`."
+    )
 
 
-@bot.command(name="closedd")
-@commands.has_permissions(manage_roles=True)
-async def cmd_close(ctx: commands.Context):
-    """Close today's attendance (no more auto-marking from voice). Admin only."""
+@bot.tree.command(name="closedd", description="Đóng điểm danh hôm nay (admin)", guild=GUILD_OBJ)
+@app_commands.default_permissions(manage_roles=True)
+async def slash_closedd(interaction: discord.Interaction):
     key = today_key()
     if key not in attendance_data:
-        await ctx.send("❌ Chưa có dữ liệu điểm danh hôm nay.")
+        await interaction.response.send_message("❌ Chưa có dữ liệu điểm danh hôm nay.", ephemeral=True)
         return
     attendance_data[key]["closed"] = True
     save_data()
-    await ctx.send(f"🔒 Đã đóng điểm danh ngày **{key}**.")
+    await interaction.response.send_message(f"🔒 Đã đóng điểm danh ngày **{key}**.")
 
 
-@bot.command(name="summary")
-@commands.has_permissions(manage_messages=True)
-async def cmd_summary(ctx: commands.Context, days: int = 7):
-    """Show an attendance summary for all members over the last N days. Admin only."""
-    guild      = ctx.guild
+@bot.tree.command(name="summary", description="Tổng hợp tỉ lệ đi học của tất cả thành viên (admin)", guild=GUILD_OBJ)
+@app_commands.default_permissions(manage_messages=True)
+@app_commands.describe(days="Số ngày gần nhất (mặc định: 7)")
+async def slash_summary(interaction: discord.Interaction, days: int = 7):
+    guild      = interaction.guild
     study_role = discord.utils.get(guild.roles, name=STUDY_ROLE_NAME)
     members    = [m for m in study_role.members if not m.bot] if study_role else []
     keys       = sorted(attendance_data.keys(), reverse=True)[:days]
 
     if not keys:
-        await ctx.send("Không có dữ liệu điểm danh nào.")
+        await interaction.response.send_message("Không có dữ liệu điểm danh nào.", ephemeral=True)
         return
 
     lines = []
     for member in sorted(members, key=lambda m: m.display_name.lower()):
-        uid = str(member.id)
-        attended = sum(
-            1 for k in keys
-            if uid in attendance_data[k].get("present", {})
-        )
-        expected = sum(
-            1 for k in keys
-            if uid in attendance_data[k].get("expected", [])
-        )
-        rate = int(attended / expected * 100) if expected else 0
-        bar  = "█" * (rate // 10) + "░" * (10 - rate // 10)
+        uid      = str(member.id)
+        attended = sum(1 for k in keys if uid in attendance_data[k].get("present", {}))
+        expected = sum(1 for k in keys if uid in attendance_data[k].get("expected", []))
+        rate     = int(attended / expected * 100) if expected else 0
+        bar      = "█" * (rate // 10) + "░" * (10 - rate // 10)
         lines.append(f"`{bar}` {rate:3d}% **{member.display_name}** ({attended}/{expected})")
 
     embed = discord.Embed(
@@ -361,53 +353,44 @@ async def cmd_summary(ctx: commands.Context, days: int = 7):
         color=discord.Color.gold()
     )
     embed.set_footer(text=" | ".join(keys))
-    await ctx.send(embed=embed)
+    await interaction.response.send_message(embed=embed)
 
 
-@bot.command(name="ddhelp")
-async def cmd_help(ctx: commands.Context):
-    """Show all attendance bot commands."""
-    embed = discord.Embed(
-        title="📖 Hướng dẫn Bot Điểm Danh",
-        color=discord.Color.purple()
-    )
-    p = COMMAND_PREFIX
+@bot.tree.command(name="ddhelp", description="Xem hướng dẫn sử dụng bot điểm danh", guild=GUILD_OBJ)
+async def slash_ddhelp(interaction: discord.Interaction):
+    embed = discord.Embed(title="📖 Hướng dẫn Bot Điểm Danh", color=discord.Color.purple())
     embed.add_field(
         name="👤 Lệnh cho thành viên",
         value=(
-            f"`{p}myattendance [số ngày]` — Xem lịch sử điểm danh của bạn\n"
-            f"`{p}ddhelp` — Hiển thị hướng dẫn này"
+            "`/myattendance [số ngày]` — Xem lịch sử điểm danh của bạn\n"
+            "`/ddhelp` — Hiển thị hướng dẫn này"
         ),
         inline=False
     )
     embed.add_field(
         name="🔧 Lệnh cho admin",
         value=(
-            f"`{p}attendance [ngày]` — Xem điểm danh hôm nay (hoặc ngày YYYY-MM-DD)\n"
-            f"`{p}mark @thành-viên` — Điểm danh thủ công\n"
-            f"`{p}unmark @thành-viên` — Xoá điểm danh\n"
-            f"`{p}initdd` — Khởi tạo danh sách điểm danh hôm nay\n"
-            f"`{p}closedd` — Đóng điểm danh hôm nay\n"
-            f"`{p}summary [số ngày]` — Tổng hợp tỉ lệ đi học"
+            "`/attendance [ngày]` — Xem điểm danh hôm nay (hoặc ngày YYYY-MM-DD)\n"
+            "`/mark @thành-viên` — Điểm danh thủ công\n"
+            "`/unmark @thành-viên` — Xoá điểm danh\n"
+            "`/initdd` — Khởi tạo danh sách điểm danh hôm nay\n"
+            "`/closedd` — Đóng điểm danh hôm nay\n"
+            "`/summary [số ngày]` — Tổng hợp tỉ lệ đi học"
         ),
         inline=False
     )
     embed.set_footer(text=f"Bot tự động điểm danh khi thành viên vào voice channel lúc {ANNOUNCE_HOUR:02d}:{ANNOUNCE_MINUTE:02d}.")
-    await ctx.send(embed=embed)
+    await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
 # ── error handling ─────────────────────────────────────────────────────────
 
-@bot.event
-async def on_command_error(ctx: commands.Context, error):
-    if isinstance(error, commands.MissingPermissions):
-        await ctx.send("❌ Bạn không có quyền dùng lệnh này.")
-    elif isinstance(error, commands.MemberNotFound):
-        await ctx.send("❌ Không tìm thấy thành viên đó.")
-    elif isinstance(error, commands.CommandNotFound):
-        pass  # silently ignore unknown commands
+@bot.tree.error
+async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
+    if isinstance(error, app_commands.MissingPermissions):
+        await interaction.response.send_message("❌ Bạn không có quyền dùng lệnh này.", ephemeral=True)
     else:
-        await ctx.send(f"⚠️ Lỗi: `{error}`")
+        await interaction.response.send_message(f"⚠️ Lỗi: `{error}`", ephemeral=True)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
