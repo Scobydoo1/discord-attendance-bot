@@ -665,6 +665,15 @@ async def on_voice_state_update(
                 session_secs = int(local_now().timestamp() - start_ts)
                 info["total_duration"] = info.get("total_duration", 0) + max(0, session_secs)
             info["session_start"]  = None
+
+            # Already met today's goal (checked in + ≥ 60 min, not disqualified)?
+            # Then the day is complete — leave quietly: no warning, no penalty.
+            if not info.get("disqualified") and info.get("total_duration", 0) >= MIN_DURATION_SECONDS:
+                await maybe_award_streak(uid, key, member)  # ensure streak granted
+                save_data()
+                print(f"[voice] {member.display_name} left after completing goal — no warning")
+                return
+
             info["leave_count"]    = info.get("leave_count", 0) + 1
             leave_count            = info["leave_count"]
             print(f"[voice] {member.display_name} left — total {info['total_duration']}s, leaves {leave_count}")
