@@ -45,9 +45,6 @@ GUILD_OBJ = discord.Object(id=GUILD_ID)
 
 attendance_data: dict = {}
 
-# In-memory: uid -> float timestamp of when they last joined the target VC
-active_voice_sessions: dict[str, float] = {}
-
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -123,6 +120,7 @@ def _blank_entry(member: discord.Member, source: str, now: datetime) -> dict:
         "total_duration": 0,
         "leave_count":    0,
         "disqualified":   False,
+        "session_start":  None,   # epoch secs while currently in VC, else None
     }
 
 
@@ -219,11 +217,17 @@ def build_award_embed(guild: discord.Guild, when: datetime):
 
 # ── voice session helpers ─────────────────────────────────────────────────────
 
-def get_live_duration(uid: str) -> int:
-    join_ts = active_voice_sessions.get(uid)
-    if join_ts is None:
+def get_live_duration(uid: str, key: str = None) -> int:
+    """Seconds elapsed in the current (still-open) VC session, from the
+    persisted session_start. Survives bot restarts because it's in the JSON."""
+    key  = key or today_key()
+    info = attendance_data.get(key, {}).get("present", {}).get(uid)
+    if not info:
         return 0
-    return int(local_now().timestamp() - join_ts)
+    start = info.get("session_start")
+    if not start:
+        return 0
+    return max(0, int(local_now().timestamp() - start))
 
 def is_qualified(uid: str, key: str) -> bool:
     info = attendance_data.get(key, {}).get("present", {}).get(uid)
@@ -233,11 +237,54 @@ def is_qualified(uid: str, key: str) -> bool:
         return True
     total = info.get("total_duration", 0)
     if key == today_key():
-        total += get_live_duration(uid)
+        total += get_live_duration(uid, key)
     return total >= MIN_DURATION_SECONDS and not info.get("disqualified", False)
 
 
 # ── startup ───────────────────────────────────────────────────────────────────
+
+def resync_voice_sessions(guild: discord.Guild):
+    """After a restart, reconcile persisted sessions with who is actually in the
+    voice channel right now. Without this, people sitting in the room when the bot
+    restarts would show 0 minutes (their in-flight session would be lost)."""
+    key = ensure_today(guild)
+    if attendance_data[key].get("closed"):
+        return
+
+    vc = guild.get_channel(VOICE_CHANNEL_ID)
+    in_room = set()
+    if isinstance(vc, (discord.VoiceChannel, discord.StageChannel)):
+        in_room = {str(m.id) for m in vc.members if not m.bot}
+
+    study_role = get_study_role(guild)
+    now_ts     = local_now().timestamp()
+    now        = local_now()
+    changed    = False
+
+    # 1) People physically in the room → make sure a session is open for them.
+    for uid in in_room:
+        member = guild.get_member(int(uid))
+        if not member or (study_role and study_role not in member.roles):
+            continue
+        if uid not in attendance_data[key]["present"]:
+            attendance_data[key]["present"][uid] = _blank_entry(member, "voice", now)
+            if uid not in attendance_data[key]["expected"]:
+                attendance_data[key]["expected"].append(uid)
+        if not attendance_data[key]["present"][uid].get("session_start"):
+            attendance_data[key]["present"][uid]["session_start"] = now_ts
+        changed = True
+
+    # 2) Entries with an open session but NOT in the room → they left while the
+    #    bot was offline. Close the session (we can't know exact leave time).
+    for uid, info in attendance_data[key]["present"].items():
+        if info.get("session_start") and uid not in in_room:
+            info["session_start"] = None
+            changed = True
+
+    if changed:
+        save_data()
+    print(f"[startup] resynced voice sessions — {len(in_room)} member(s) currently in room")
+
 
 @bot.event
 async def on_ready():
@@ -246,6 +293,9 @@ async def on_ready():
         daily_announce.start()
     if not monthly_award.is_running():
         monthly_award.start()
+    for g in bot.guilds:
+        if g.id == GUILD_ID:
+            resync_voice_sessions(g)
     bot.tree.copy_global_to(guild=GUILD_OBJ)
     await bot.tree.sync(guild=GUILD_OBJ)
     print(f"✅  {bot.user} is online!")
@@ -472,29 +522,34 @@ async def on_voice_state_update(
     )
 
     if joined_vc:
-        active_voice_sessions[uid] = local_now().timestamp()
-
         key = ensure_today(member.guild)
         if attendance_data[key].get("closed"):
             return
 
-        now = local_now()
+        now    = local_now()
+        now_ts = now.timestamp()
         if uid not in attendance_data[key]["present"]:
             attendance_data[key]["present"][uid] = _blank_entry(member, "voice", now)
             if uid not in attendance_data[key]["expected"]:
                 attendance_data[key]["expected"].append(uid)
-            save_data()
+        # Open a new session (persisted, so it survives restarts)
+        attendance_data[key]["present"][uid]["session_start"] = now_ts
+        save_data()
+        print(f"[voice] {member.display_name} joined — session opened")
 
     elif left_vc:
-        key     = today_key()
-        join_ts = active_voice_sessions.pop(uid, None)
+        key = today_key()
 
-        if join_ts and key in attendance_data and uid in attendance_data[key]["present"]:
-            info         = attendance_data[key]["present"][uid]
-            session_secs = int(local_now().timestamp() - join_ts)
-            info["total_duration"] = info.get("total_duration", 0) + session_secs
+        if key in attendance_data and uid in attendance_data[key]["present"]:
+            info     = attendance_data[key]["present"][uid]
+            start_ts = info.get("session_start")
+            if start_ts:
+                session_secs = int(local_now().timestamp() - start_ts)
+                info["total_duration"] = info.get("total_duration", 0) + max(0, session_secs)
+            info["session_start"]  = None
             info["leave_count"]    = info.get("leave_count", 0) + 1
             leave_count            = info["leave_count"]
+            print(f"[voice] {member.display_name} left — total {info['total_duration']}s, leaves {leave_count}")
 
             if leave_count > MAX_LEAVES:
                 info["disqualified"] = True
@@ -752,13 +807,13 @@ async def slash_closedd(interaction: discord.Interaction):
         await interaction.response.send_message("❌ Chưa có dữ liệu điểm danh hôm nay.", ephemeral=True)
         return
 
-    # Flush any still-active voice sessions before closing
-    for uid, join_ts in list(active_voice_sessions.items()):
-        if uid in attendance_data[key]["present"]:
-            info         = attendance_data[key]["present"][uid]
-            session_secs = int(local_now().timestamp() - join_ts)
-            info["total_duration"] = info.get("total_duration", 0) + session_secs
-    active_voice_sessions.clear()
+    # Flush any still-open voice sessions before closing
+    for info in attendance_data[key]["present"].values():
+        start_ts = info.get("session_start")
+        if start_ts:
+            session_secs = int(local_now().timestamp() - start_ts)
+            info["total_duration"] = info.get("total_duration", 0) + max(0, session_secs)
+            info["session_start"]  = None
 
     attendance_data[key]["closed"] = True
     save_data()
@@ -766,6 +821,37 @@ async def slash_closedd(interaction: discord.Interaction):
 
     await interaction.response.send_message(
         f"🔒 Đã đóng điểm danh ngày **{key}** và cập nhật streak cho tất cả thành viên đạt yêu cầu."
+    )
+
+
+@bot.tree.command(
+    name="resetday",
+    description="Xoá toàn bộ điểm danh hôm nay để test lại (admin)",
+    guild=GUILD_OBJ,
+)
+@app_commands.default_permissions(manage_roles=True)
+@app_commands.describe(date="Ngày cần reset YYYY-MM-DD, để trống = hôm nay")
+async def slash_resetday(interaction: discord.Interaction, date: str = None):
+    key = date or today_key()
+    if key not in attendance_data:
+        await interaction.response.send_message(
+            f"❌ Không có dữ liệu điểm danh cho ngày `{key}`.", ephemeral=True
+        )
+        return
+
+    # Wipe today's check-ins (present + open sessions + announcement link).
+    # Does NOT touch _streaks, so streaks are preserved.
+    n = len(attendance_data[key].get("present", {}))
+    attendance_data[key]["present"] = {}
+    attendance_data[key]["closed"]  = False
+    attendance_data[key].pop("announce_message_id", None)
+    save_data()
+
+    await interaction.response.send_message(
+        f"♻️ Đã reset điểm danh ngày **{key}** — xoá **{n}** lượt điểm danh. "
+        f"Mọi người giờ đều **chưa điểm danh** và có thể điểm danh lại.\n"
+        f"💡 Dùng `/announce` để đăng lại tin nhắn thả {CHECKIN_EMOJI} điểm danh.",
+        ephemeral=True,
     )
 
 
@@ -894,6 +980,7 @@ async def slash_ddhelp(interaction: discord.Interaction):
             "`/unmark @thành-viên` — Xoá điểm danh\n"
             "`/initdd` — Khởi tạo danh sách điểm danh hôm nay\n"
             "`/closedd` — Đóng điểm danh & cập nhật streak\n"
+            "`/resetday` — Xoá điểm danh hôm nay để test lại\n"
             "`/summary [số ngày]` — Tổng hợp tỉ lệ đi học\n"
             "`/announce` — Đăng thông báo điểm danh ngay\n"
             "`/award` — Đăng vinh danh streak ngay"
