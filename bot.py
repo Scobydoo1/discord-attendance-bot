@@ -397,31 +397,43 @@ async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
     if payload.user_id == bot.user.id:
         return  # ignore the bot's own seed reaction
     if str(payload.emoji) != CHECKIN_EMOJI:
+        print(f"[reaction] ignored: emoji {payload.emoji!r} != {CHECKIN_EMOJI!r}")
         return
 
     key = today_key()
     day = attendance_data.get(key)
     if not day:
+        print(f"[reaction] ignored: no attendance record for today ({key})")
         return
     # Only the daily announcement message counts
     if payload.message_id != day.get("announce_message_id"):
+        print(
+            f"[reaction] ignored: msg {payload.message_id} is not today's "
+            f"announcement ({day.get('announce_message_id')}). Use /announce."
+        )
         return
     if day.get("closed"):
+        print("[reaction] ignored: attendance is closed for today")
         return
 
-    member = payload.member
+    guild  = bot.get_guild(payload.guild_id)
+    member = payload.member or (guild.get_member(payload.user_id) if guild else None)
     if member is None or member.bot:
+        print(f"[reaction] ignored: member {payload.user_id} not resolvable / is bot")
         return
 
     study_role = get_study_role(member.guild)
     if not study_role or study_role not in member.roles:
+        print(f"[reaction] ignored: {member.display_name} lacks study role")
         return
 
     uid = str(member.id)
     if uid in day["present"]:
-        return  # already marked
+        print(f"[reaction] {member.display_name} already checked in today — no DM")
+        return
 
     now = local_now()
+    print(f"[reaction] ✅ checking in {member.display_name}")
     day["present"][uid] = _blank_entry(member, "reaction", now)
     if uid not in day["expected"]:
         day["expected"].append(uid)
