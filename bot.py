@@ -286,6 +286,29 @@ def resync_voice_sessions(guild: discord.Guild):
     print(f"[startup] resynced voice sessions — {len(in_room)} member(s) currently in room")
 
 
+@tasks.loop(minutes=2)
+async def flush_voice_sessions():
+    """Periodically commit in-flight voice time into total_duration so it is
+    saved continuously and survives restarts (instead of only on leave)."""
+    key = today_key()
+    day = attendance_data.get(key)
+    if not day or day.get("closed"):
+        return
+
+    now_ts  = local_now().timestamp()
+    changed = False
+    for info in day.get("present", {}).values():
+        start = info.get("session_start")
+        if start:
+            elapsed = int(now_ts - start)
+            if elapsed > 0:
+                info["total_duration"] = info.get("total_duration", 0) + elapsed
+                info["session_start"]  = now_ts  # re-anchor; keep session open
+                changed = True
+    if changed:
+        save_data()
+
+
 @bot.event
 async def on_ready():
     load_data()
@@ -296,6 +319,8 @@ async def on_ready():
     for g in bot.guilds:
         if g.id == GUILD_ID:
             resync_voice_sessions(g)
+    if not flush_voice_sessions.is_running():
+        flush_voice_sessions.start()
     bot.tree.copy_global_to(guild=GUILD_OBJ)
     await bot.tree.sync(guild=GUILD_OBJ)
     print(f"✅  {bot.user} is online!")
