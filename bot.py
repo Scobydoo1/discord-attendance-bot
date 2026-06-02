@@ -29,11 +29,13 @@ ATTENDANCE_FILE     = os.getenv("ATTENDANCE_FILE", "data/attendance.json")
 
 MIN_DURATION_SECONDS = 3600  # 1 hour minimum
 MAX_LEAVES           = 3     # maximum leave count before disqualification
+CHECKIN_EMOJI        = os.getenv("CHECKIN_EMOJI", "✅")  # react to announcement = present
 
 intents = discord.Intents.default()
 intents.message_content = True
 intents.members         = True
 intents.voice_states    = True
+intents.reactions       = True
 
 bot       = commands.Bot(command_prefix="!", intents=intents)
 GUILD_OBJ = discord.Object(id=GUILD_ID)
@@ -231,12 +233,21 @@ async def daily_announce():
             f"• Ở trong phòng tối thiểu **1 tiếng** (3600 giây)\n"
             f"• Ra/vào phòng tối đa **{MAX_LEAVES} lần**\n"
             f"• Vượt quá {MAX_LEAVES} lần rời phòng → bị đánh **vắng mặt**\n\n"
+            f"👉 Thả cảm xúc {CHECKIN_EMOJI} vào tin nhắn này để **điểm danh** ngay!\n"
             f"Dùng `/myattendance` để xem streak của bạn."
         ),
         color=discord.Color.blurple()
     )
     embed.set_footer(text=f"Ngày {key} — Bot Điểm Danh")
-    await channel.send(content=ping_mention, embed=embed)
+    msg = await channel.send(content=ping_mention, embed=embed)
+
+    # Remember this message so reactions on it count as check-ins
+    attendance_data[key]["announce_message_id"] = msg.id
+    save_data()
+    try:
+        await msg.add_reaction(CHECKIN_EMOJI)
+    except discord.HTTPException:
+        pass
 
 
 # ── auto check-in via text message ───────────────────────────────────────────
@@ -268,6 +279,54 @@ async def on_message(message: discord.Message):
     if uid not in attendance_data[key]["expected"]:
         attendance_data[key]["expected"].append(uid)
     save_data()
+
+
+# ── auto check-in via reaction on announcement ────────────────────────────────
+
+@bot.event
+async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
+    if payload.guild_id != GUILD_ID:
+        return
+    if payload.user_id == bot.user.id:
+        return  # ignore the bot's own seed reaction
+    if str(payload.emoji) != CHECKIN_EMOJI:
+        return
+
+    key = today_key()
+    day = attendance_data.get(key)
+    if not day:
+        return
+    # Only the daily announcement message counts
+    if payload.message_id != day.get("announce_message_id"):
+        return
+    if day.get("closed"):
+        return
+
+    member = payload.member
+    if member is None or member.bot:
+        return
+
+    study_role = get_study_role(member.guild)
+    if not study_role or study_role not in member.roles:
+        return
+
+    uid = str(member.id)
+    if uid in day["present"]:
+        return  # already marked
+
+    now = local_now()
+    day["present"][uid] = _blank_entry(member, "reaction", now)
+    if uid not in day["expected"]:
+        day["expected"].append(uid)
+    save_data()
+
+    try:
+        await member.send(
+            f"✅ Đã ghi nhận điểm danh của bạn lúc **{now.strftime('%H:%M')}** "
+            f"(qua reaction)!\nĐừng quên vào phòng học đủ **1 tiếng** để đạt yêu cầu nhé."
+        )
+    except discord.Forbidden:
+        pass
 
 
 # ── voice tracking ────────────────────────────────────────────────────────────
