@@ -30,6 +30,8 @@ ATTENDANCE_FILE     = os.getenv("ATTENDANCE_FILE", "data/attendance.json")
 MIN_DURATION_SECONDS = 3600  # 1 hour minimum
 MAX_LEAVES           = 3     # maximum leave count before disqualification
 CHECKIN_EMOJI        = os.getenv("CHECKIN_EMOJI", "✅")  # react to announcement = present
+MONTHLY_AWARD_HOUR   = int(os.getenv("MONTHLY_AWARD_HOUR", 21))   # end-of-month praise time
+MONTHLY_AWARD_MINUTE = int(os.getenv("MONTHLY_AWARD_MINUTE", 0))
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -94,6 +96,7 @@ def load_data():
         with open(ATTENDANCE_FILE, "r", encoding="utf-8") as f:
             attendance_data = json.load(f)
     attendance_data.setdefault("_streaks", {})
+    attendance_data.setdefault("_meta", {})
 
 def save_data():
     os.makedirs(os.path.dirname(ATTENDANCE_FILE) or ".", exist_ok=True)
@@ -153,7 +156,9 @@ def update_streak(uid: str, attended_date_str: str):
     save_data()
 
 def get_current_streak(uid: str, as_of: str = None) -> int:
-    rec      = _streak_record(uid)
+    rec = attendance_data.get("_streaks", {}).get(uid)  # read-only, don't create
+    if not rec:
+        return 0
     last_str = rec.get("last_attended")
     if not last_str:
         return 0
@@ -162,6 +167,53 @@ def get_current_streak(uid: str, as_of: str = None) -> int:
     if (ref - last).days > 2:
         return 0  # streak has expired
     return rec.get("current_streak", 0)
+
+def get_longest_streak(uid: str) -> int:
+    return attendance_data.get("_streaks", {}).get(uid, {}).get("longest_streak", 0)
+
+def build_streak_leaderboard(guild: discord.Guild) -> list:
+    """Return [(member, current_streak, longest_streak), ...] sorted high→low."""
+    study_role = get_study_role(guild)
+    members    = [m for m in study_role.members if not m.bot] if study_role else []
+    ranking    = [
+        (m, get_current_streak(str(m.id)), get_longest_streak(str(m.id)))
+        for m in members
+    ]
+    ranking.sort(key=lambda x: (x[1], x[2]), reverse=True)
+    return ranking
+
+def build_award_embed(guild: discord.Guild, when: datetime):
+    """Build the monthly hall-of-fame embed, or None if nobody has a streak."""
+    ranking = [r for r in build_streak_leaderboard(guild) if r[1] > 0]
+    if not ranking:
+        return None
+
+    top_streak = ranking[0][1]
+    winners    = [r for r in ranking if r[1] == top_streak]
+    medals     = ["🥇", "🥈", "🥉"]
+
+    board = []
+    for i, (m, streak, longest) in enumerate(ranking[:10]):
+        rank = medals[i] if i < 3 else f"`#{i + 1}`"
+        board.append(f"{rank} **{m.display_name}** — 🔥 {streak} ngày (kỷ lục: {longest})")
+
+    embed = discord.Embed(
+        title=f"🏆 BẢNG VÀNG STREAK — Tháng {when.strftime('%m/%Y')}",
+        description=(
+            "Chúc mừng những chiến binh kiên trì nhất tháng này! 🎉\n"
+            "Sự đều đặn của các bạn là tấm gương cho cả nhóm. 💪"
+        ),
+        color=discord.Color.gold(),
+    )
+    winner_mentions = ", ".join(w[0].mention for w in winners)
+    embed.add_field(
+        name="👑 Quán quân Streak",
+        value=f"{winner_mentions}\n🔥 **{top_streak} ngày** liên tiếp — xuất sắc!",
+        inline=False,
+    )
+    embed.add_field(name="📊 Bảng xếp hạng", value="\n".join(board), inline=False)
+    embed.set_footer(text="Tiếp tục giữ vững phong độ cho tháng sau nhé!")
+    return embed
 
 
 # ── voice session helpers ─────────────────────────────────────────────────────
@@ -191,6 +243,8 @@ async def on_ready():
     load_data()
     if not daily_announce.is_running():
         daily_announce.start()
+    if not monthly_award.is_running():
+        monthly_award.start()
     bot.tree.copy_global_to(guild=GUILD_OBJ)
     await bot.tree.sync(guild=GUILD_OBJ)
     print(f"✅  {bot.user} is online!")
@@ -248,6 +302,42 @@ async def daily_announce():
         await msg.add_reaction(CHECKIN_EMOJI)
     except discord.HTTPException:
         pass
+
+
+# ── monthly streak award ──────────────────────────────────────────────────────
+
+@tasks.loop(minutes=1)
+async def monthly_award():
+    now = local_now()
+    if now.hour != MONTHLY_AWARD_HOUR or now.minute != MONTHLY_AWARD_MINUTE:
+        return
+    # Fire only on the last day of the month
+    if (now + timedelta(days=1)).month == now.month:
+        return
+
+    guild = bot.get_guild(GUILD_ID)
+    if not guild:
+        return
+
+    month_key = now.strftime("%Y-%m")
+    meta      = attendance_data.setdefault("_meta", {})
+    if meta.get("last_award_month") == month_key:
+        return  # already awarded this month
+
+    channel = guild.get_channel(ANNOUNCE_CHANNEL_ID)
+    if not channel:
+        return
+
+    embed = build_award_embed(guild, now)
+    if embed is None:
+        return
+
+    ping_role    = get_ping_role(guild)
+    ping_mention = ping_role.mention if ping_role else ""
+    await channel.send(content=f"🏆 **VINH DANH CUỐI THÁNG!** 🏆 {ping_mention}", embed=embed)
+
+    meta["last_award_month"] = month_key
+    save_data()
 
 
 # ── auto check-in via text message ───────────────────────────────────────────
@@ -688,6 +778,50 @@ async def slash_summary(interaction: discord.Interaction, days: int = 7):
 
 
 @bot.tree.command(
+    name="topstreak",
+    description="Xem bảng xếp hạng streak hiện tại của cả nhóm",
+    guild=GUILD_OBJ,
+)
+async def slash_topstreak(interaction: discord.Interaction):
+    ranking = [r for r in build_streak_leaderboard(interaction.guild) if r[1] > 0]
+    if not ranking:
+        await interaction.response.send_message(
+            "Chưa có ai có streak nào. Hãy là người đầu tiên! 🔥", ephemeral=True
+        )
+        return
+
+    medals = ["🥇", "🥈", "🥉"]
+    lines  = []
+    for i, (m, streak, longest) in enumerate(ranking[:15]):
+        rank = medals[i] if i < 3 else f"`#{i + 1}`"
+        lines.append(f"{rank} **{m.display_name}** — 🔥 {streak} ngày (kỷ lục: {longest})")
+
+    embed = discord.Embed(
+        title="🔥 Bảng xếp hạng Streak",
+        description="\n".join(lines),
+        color=discord.Color.orange(),
+    )
+    embed.set_footer(text="🏆 Người dẫn đầu cuối tháng sẽ được vinh danh!")
+    await interaction.response.send_message(embed=embed)
+
+
+@bot.tree.command(
+    name="award",
+    description="Đăng vinh danh streak ngay bây giờ (admin)",
+    guild=GUILD_OBJ,
+)
+@app_commands.default_permissions(manage_messages=True)
+async def slash_award(interaction: discord.Interaction):
+    embed = build_award_embed(interaction.guild, local_now())
+    if embed is None:
+        await interaction.response.send_message(
+            "Chưa có ai có streak để vinh danh.", ephemeral=True
+        )
+        return
+    await interaction.response.send_message(content="🏆 **VINH DANH STREAK!** 🏆", embed=embed)
+
+
+@bot.tree.command(
     name="ddhelp",
     description="Xem hướng dẫn sử dụng bot điểm danh",
     guild=GUILD_OBJ,
@@ -698,6 +832,7 @@ async def slash_ddhelp(interaction: discord.Interaction):
         name="👤 Lệnh cho thành viên",
         value=(
             "`/myattendance [số ngày]` — Xem lịch sử & streak của bạn\n"
+            "`/topstreak` — Bảng xếp hạng streak cả nhóm\n"
             "`/ddhelp` — Hiển thị hướng dẫn này"
         ),
         inline=False,
@@ -710,7 +845,8 @@ async def slash_ddhelp(interaction: discord.Interaction):
             "`/unmark @thành-viên` — Xoá điểm danh\n"
             "`/initdd` — Khởi tạo danh sách điểm danh hôm nay\n"
             "`/closedd` — Đóng điểm danh & cập nhật streak\n"
-            "`/summary [số ngày]` — Tổng hợp tỉ lệ đi học"
+            "`/summary [số ngày]` — Tổng hợp tỉ lệ đi học\n"
+            "`/award` — Đăng vinh danh streak ngay"
         ),
         inline=False,
     )
@@ -720,7 +856,8 @@ async def slash_ddhelp(interaction: discord.Interaction):
             f"• Ở trong phòng tối thiểu **1 tiếng** (3600 giây)\n"
             f"• Ra/vào phòng tối đa **{MAX_LEAVES} lần**\n"
             f"• Streak không bị reset nếu chỉ nghỉ **≤ 2 ngày** liên tiếp\n"
-            f"• Chat trong server (sau giờ học) cũng được tính điểm danh"
+            f"• Chat trong server (sau giờ học) cũng được tính điểm danh\n"
+            f"• 🏆 Cuối tháng vinh danh người có streak cao nhất!"
         ),
         inline=False,
     )
