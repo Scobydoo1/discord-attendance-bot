@@ -34,6 +34,30 @@ MONTHLY_AWARD_DAY    = int(os.getenv("MONTHLY_AWARD_DAY", 29))    # day of month
 MONTHLY_AWARD_HOUR   = int(os.getenv("MONTHLY_AWARD_HOUR", 22))   # praise time (hour)
 MONTHLY_AWARD_MINUTE = int(os.getenv("MONTHLY_AWARD_MINUTE", 0))
 
+# Instructional guidance posted with every daily announcement
+GUIDANCE_TEXT = (
+    "📢ĐÂY LÀ HƯỚNG DẪN ĐIỂM DANH HỆ THỐNG HuyFAKE-BOT📢\n\n"
+    "- Chào mừng bạn đã tham gia vào event \"🎯Cùng nhau phát triển💯\" dưới đây là "
+    "hướng dẫn để bạn có thể điểm danh và có streak nhennn.\n\n"
+    "+Tổng quan: \n"
+    "Cứ mỗi ngày vào lúc 8h PM, thì 🤖 \"HuyFAKE-BOT\" sẽ tự động gửi 1 tin nhắn vào "
+    "đây để điểm danh.\n\n"
+    "+B1: \n"
+    "Sau khi \"HuyFAKE-BOT\" gửi thông báo điểm danh xong thì bạn phải bấm vào emoji "
+    "này '✅' để được điểm danh (lưu ý: bắt buộc phải bấm). Sau đó 🤖 sẽ tự động gửi "
+    "1 tin nhắn riêng cho bạn để báo đã điểm danh thành công, thì lúc này bạn đã được "
+    "điểm danh rồi đấy.\n\n"
+    "+B2: \n"
+    "Sau khi hoàn thành bước điểm danh thì bạn sẽ được 🤖 theo dõi thời gian bạn ngồi "
+    "trong channel liên tục và nếu bạn muốn coi mình đã ngồi được bao lâu thì hãy xài "
+    "câu lệnh sau để check \"/attendance\". Và sau khi hoàn thành đủ 1 tiếng tự học và "
+    "ngồi trong channel thì chúc mừng bạn đã đạt được mục tiêu của hôm nay và sẽ được "
+    "bot +1 streak vào ngày hôm nay.\n\n"
+    "+B3: \n"
+    "Sau khi cày cuốc và nổ lực thì đến cuối tháng thì sẽ có các phần 🎁 hấp dẫn cho "
+    "người chăm chỉ nhất của tháng vừa qua."
+)
+
 intents = discord.Intents.default()
 intents.message_content = True
 intents.members         = True
@@ -121,6 +145,7 @@ def _blank_entry(member: discord.Member, source: str, now: datetime) -> dict:
         "leave_count":    0,
         "disqualified":   False,
         "session_start":  None,   # epoch secs while currently in VC, else None
+        "streak_awarded": False,  # True once the +1 streak was given today
     }
 
 
@@ -153,6 +178,16 @@ def update_streak(uid: str, attended_date_str: str):
     rec["last_attended"]  = attended_date_str
     rec["longest_streak"] = max(rec.get("longest_streak", 0), rec["current_streak"])
     save_data()
+
+def break_streak(uid: str) -> bool:
+    """Immediately reset a user's current streak to 0 (penalty). Returns True
+    if a non-zero streak was actually broken."""
+    rec = attendance_data.get("_streaks", {}).get(uid)
+    if rec and rec.get("current_streak", 0) != 0:
+        rec["current_streak"] = 0
+        save_data()
+        return True
+    return False
 
 def get_current_streak(uid: str, as_of: str = None) -> int:
     rec = attendance_data.get("_streaks", {}).get(uid)  # read-only, don't create
@@ -240,6 +275,41 @@ def is_qualified(uid: str, key: str) -> bool:
         total += get_live_duration(uid, key)
     return total >= MIN_DURATION_SECONDS and not info.get("disqualified", False)
 
+def announcement_posted_today() -> bool:
+    """Voice tracking only activates after the daily announcement has been posted."""
+    return bool(attendance_data.get(today_key(), {}).get("announce_message_id"))
+
+async def maybe_award_streak(uid: str, key: str, member: discord.Member = None):
+    """Real-time +1 streak the moment a checked-in user reaches 60 minutes of
+    voice time. Awarded at most once per day (guarded by streak_awarded)."""
+    info = attendance_data.get(key, {}).get("present", {}).get(uid)
+    if not info or info.get("streak_awarded") or info.get("disqualified"):
+        return
+
+    total = info.get("total_duration", 0)
+    if key == today_key():
+        total += get_live_duration(uid, key)
+    if total < MIN_DURATION_SECONDS:
+        return
+
+    update_streak(uid, key)
+    info["streak_awarded"] = True
+    save_data()
+
+    streak = get_current_streak(uid, key)
+    if member is None:
+        g = bot.get_guild(GUILD_ID)
+        member = g.get_member(int(uid)) if g else None
+    print(f"[streak] ✅ {uid} reached 60 min → streak now {streak}")
+    if member:
+        try:
+            await member.send(
+                f"🎉 Chúc mừng! Bạn đã hoàn thành đủ **1 tiếng** tự học hôm nay.\n"
+                f"🔥 Streak của bạn hiện là **{streak} ngày**! Cố gắng giữ vững nhé!"
+            )
+        except discord.Forbidden:
+            pass
+
 
 # ── startup ───────────────────────────────────────────────────────────────────
 
@@ -249,6 +319,10 @@ def resync_voice_sessions(guild: discord.Guild):
     restarts would show 0 minutes (their in-flight session would be lost)."""
     key = ensure_today(guild)
     if attendance_data[key].get("closed"):
+        return
+    # Voice tracking is only active once today's announcement has been posted.
+    if not attendance_data[key].get("announce_message_id"):
+        print("[startup] announcement not posted yet today — voice tracking inactive")
         return
 
     vc = guild.get_channel(VOICE_CHANNEL_ID)
@@ -286,10 +360,11 @@ def resync_voice_sessions(guild: discord.Guild):
     print(f"[startup] resynced voice sessions — {len(in_room)} member(s) currently in room")
 
 
-@tasks.loop(minutes=2)
+@tasks.loop(minutes=1)
 async def flush_voice_sessions():
-    """Periodically commit in-flight voice time into total_duration so it is
-    saved continuously and survives restarts (instead of only on leave)."""
+    """Every minute: commit in-flight voice time into total_duration (so it is
+    saved continuously and survives restarts), then award the +1 streak in
+    real-time to anyone who has just crossed the 60-minute mark."""
     key = today_key()
     day = attendance_data.get(key)
     if not day or day.get("closed"):
@@ -307,6 +382,10 @@ async def flush_voice_sessions():
                 changed = True
     if changed:
         save_data()
+
+    # Real-time streak rewards: anyone checked-in who has now reached 60 min.
+    for uid in list(day.get("present", {})):
+        await maybe_award_streak(uid, key)
 
 
 @bot.event
@@ -373,6 +452,16 @@ async def post_announcement(guild: discord.Guild):
         await msg.add_reaction(CHECKIN_EMOJI)
     except discord.HTTPException:
         pass
+
+    # Follow-up: detailed system guidance (Vietnamese)
+    try:
+        await channel.send(GUIDANCE_TEXT)
+    except discord.HTTPException:
+        pass
+
+    # Voice tracking only becomes active now → open sessions for anyone already
+    # sitting in the room at announcement time.
+    resync_voice_sessions(guild)
     return msg
 
 
@@ -550,6 +639,10 @@ async def on_voice_state_update(
         key = ensure_today(member.guild)
         if attendance_data[key].get("closed"):
             return
+        # Only track voice time AFTER the daily announcement has been posted.
+        if not announcement_posted_today():
+            print(f"[voice] {member.display_name} joined but announcement not posted yet — not tracking")
+            return
 
         now    = local_now()
         now_ts = now.timestamp()
@@ -578,11 +671,18 @@ async def on_voice_state_update(
 
             if leave_count > MAX_LEAVES:
                 info["disqualified"] = True
+                # Immediate penalty: break any active streak right now.
+                streak_broken = break_streak(uid)
                 save_data()
+                penalty = (
+                    "\n🔥 Streak của bạn đã bị **reset về 0** do vi phạm."
+                    if streak_broken else ""
+                )
                 try:
                     await member.send(
                         f"⛔ Bạn đã rời phòng học **{leave_count} lần** (giới hạn: {MAX_LEAVES} lần).\n"
                         f"Bạn đã bị đánh **vắng mặt** cho ngày hôm nay do vi phạm quy định."
+                        f"{penalty}"
                     )
                 except discord.Forbidden:
                     pass
@@ -596,6 +696,9 @@ async def on_voice_state_update(
                     )
                 except discord.Forbidden:
                     pass
+
+            # If they had already accumulated ≥ 60 min before leaving, award now.
+            await maybe_award_streak(uid, key, member)
 
 
 # ── streak finalization ───────────────────────────────────────────────────────
