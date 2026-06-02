@@ -1,6 +1,6 @@
-# 📚 Discord Attendance Bot
+# 📚 Discord Attendance Bot (v2)
 
-A Discord bot that automatically tracks attendance for members with the **study** role. It announces study time at 8 PM and marks members present when they join the designated voice channel.
+A Discord bot that tracks study attendance with strict discipline rules: 1-hour minimum in voice, max 3 leaves, streak retention with 2-day insurance, and auto check-in via text message.
 
 ---
 
@@ -8,13 +8,17 @@ A Discord bot that automatically tracks attendance for members with the **study*
 
 | Feature | Detail |
 |---|---|
-| 📣 Daily announcement | Pings `@AE-Cứu vớt tương lai` role at 8 PM every day |
-| ✅ Auto attendance | Marks members present when they join the voice channel |
+| 📣 Daily announcement | Pings `PING_ROLE_NAME` role at the configured hour every day |
+| ✅ Auto attendance (voice) | Marks present when member joins the study voice channel |
+| 💬 Auto attendance (text) | Marks present when member sends any message after announce time |
 | ⏰ Late detection | Members joining after the grace period are marked late |
-| 📋 Attendance report | Admin command to view who's present / absent |
-| 📊 Summary report | Attendance rate % for all members over N days |
+| ⏱️ 1-hour minimum | Members must accumulate ≥ 3600 s in the voice channel |
+| 🚪 Max 3 leaves | > 3 exits from the voice channel → disqualified, DM warning sent |
+| 🔥 Streak system | Consecutive-day streak with **2-day insurance** (1-day gap doesn't break it) |
+| 📋 3-tier report | `/attendance` splits results into: Passed / Unqualified / Absent |
+| 📊 Summary leaderboard | `/summary` shows attendance rate + current streak per member |
 | ✏️ Manual override | Admins can manually mark or unmark members |
-| 💬 Personal history | Each member can check their own attendance history |
+| 💬 Personal history | Each member can check their own attendance history + streak |
 
 ---
 
@@ -25,7 +29,7 @@ A Discord bot that automatically tracks attendance for members with the **study*
 1. Go to [https://discord.com/developers/applications](https://discord.com/developers/applications)
 2. Click **New Application**, give it a name (e.g. `AttendanceBot`)
 3. Go to the **Bot** tab → click **Add Bot**
-4. Under **TOKEN** → click **Reset Token** and copy it (you'll need it later)
+4. Under **TOKEN** → click **Reset Token** and copy it
 5. Scroll down to **Privileged Gateway Intents** and enable all three:
    - ✅ Presence Intent
    - ✅ Server Members Intent
@@ -35,12 +39,12 @@ A Discord bot that automatically tracks attendance for members with the **study*
 ### Step 2 — Invite the Bot to Your Server
 
 1. Go to **OAuth2 → URL Generator**
-2. Under **Scopes**, check: `bot`
+2. Under **Scopes**, check: `bot`, `applications.commands`
 3. Under **Bot Permissions**, check:
    - `Send Messages`
    - `Embed Links`
    - `Read Message History`
-   - `Mention Everyone` (for role pings)
+   - `Mention Everyone`
 4. Copy the generated URL → open it in a browser → add the bot to your server
 
 ### Step 3 — Get IDs (Enable Developer Mode)
@@ -52,34 +56,28 @@ A Discord bot that automatically tracks attendance for members with the **study*
 
 ### Step 4 — Configure the Bot
 
-```bash
-# Copy the example config file
-cp .env.example .env
-
-# Edit .env with your values
-nano .env   # or use any text editor
-```
-
-Fill in these required values in `.env`:
+Create a `.env` file in the project root:
 
 ```
 DISCORD_TOKEN=your-bot-token-here
 GUILD_ID=your-server-id
 ANNOUNCE_CHANNEL_ID=your-text-channel-id
 VOICE_CHANNEL_ID=your-voice-channel-id
+STUDY_ROLE_NAME=study
+PING_ROLE_NAME=anh em cứu vớt tuong lai
+ANNOUNCE_HOUR=20
+ANNOUNCE_MINUTE=0
+LATE_GRACE_MINUTES=15
+TIMEZONE_OFFSET=7
+ATTENDANCE_FILE=data/attendance.json
 ```
 
 ### Step 5 — Install & Run
 
 ```bash
-# Install Python dependencies
 pip install -r requirements.txt
-
-# Start the bot
 python bot.py
 ```
-
-You should see: `✅ AttendanceBot#1234 is online!`
 
 ---
 
@@ -88,80 +86,64 @@ You should see: `✅ AttendanceBot#1234 is online!`
 ### For all members
 | Command | Description |
 |---|---|
-| `!myattendance` | See your attendance history (last 7 days) |
-| `!myattendance 30` | See history for last 30 days |
-| `!ddhelp` | Show help menu |
+| `/myattendance [days]` | See your attendance history, streak, and longest streak |
+| `/ddhelp` | Show help menu |
 
 ### For admins (requires `Manage Messages` or `Manage Roles`)
 | Command | Description |
 |---|---|
-| `!attendance` | View today's attendance report |
-| `!attendance 2024-12-25` | View attendance for a specific date |
-| `!summary` | See attendance rate % for all members (last 7 days) |
-| `!summary 30` | Summary for last 30 days |
-| `!mark @member` | Manually mark someone as present |
-| `!unmark @member` | Remove someone's attendance for today |
-| `!initdd` | Re-initialise today's expected list from the role |
-| `!closedd` | Close today's attendance (no more auto-marking) |
+| `/attendance [date]` | View attendance split into 3 tiers (passed / unqualified / absent) |
+| `/summary [days]` | See attendance rate + current streak for all members |
+| `/mark @member` | Manually mark someone as present (auto-qualifies + updates streak) |
+| `/unmark @member` | Remove someone's attendance for today |
+| `/initdd` | Re-initialise today's expected list from the role |
+| `/closedd` | Close today's attendance, flush voice sessions, update all streaks |
 
 ---
 
-## 📁 How Data is Stored
+## 📋 Attendance Rules
 
-Attendance is saved to `attendance.json` automatically:
+| Rule | Detail |
+|---|---|
+| Minimum stay | Must accumulate **≥ 1 hour** (3600 s) total in the voice channel |
+| Max leaves | May leave and rejoin the voice channel up to **3 times** |
+| Disqualification | Leaving more than 3 times → marked absent, DM warning sent |
+| Text check-in | Sending any message after announce time also marks attendance (no voice requirement for this path) |
+| Streak insurance | Streak survives a **1-day gap** (skip 1 day → streak continues; skip 2+ days → reset) |
+
+---
+
+## 📁 Data Structure
 
 ```json
 {
-  "2024-12-25": {
-    "expected": ["111222333", "444555666"],
+  "_streaks": {
+    "123456789": {
+      "current_streak": 5,
+      "last_attended": "2026-06-01",
+      "longest_streak": 12
+    }
+  },
+  "2026-06-01": {
+    "expected": ["123456789", "987654321"],
     "present": {
-      "111222333": {
+      "123456789": {
         "name": "Alice",
         "join_time": "20:03:12",
         "late": false,
-        "manual": false
+        "manual": false,
+        "source": "voice",
+        "total_duration": 4200,
+        "leave_count": 1,
+        "disqualified": false
       }
     },
-    "closed": false
+    "closed": true
   }
 }
 ```
 
----
-
-## 🔄 How to Keep the Bot Running 24/7
-
-### Option A — Screen (Linux/VPS)
-```bash
-screen -S attendancebot
-python bot.py
-# Press Ctrl+A then D to detach
-```
-
-### Option B — PM2 (Node.js process manager)
-```bash
-npm install -g pm2
-pm2 start bot.py --interpreter python3 --name attendancebot
-pm2 save
-pm2 startup
-```
-
-### Option C — systemd service (Linux)
-Create `/etc/systemd/system/attendancebot.service`:
-```ini
-[Unit]
-Description=Discord Attendance Bot
-After=network.target
-
-[Service]
-WorkingDirectory=/path/to/your/bot
-ExecStart=/usr/bin/python3 bot.py
-Restart=always
-
-[Install]
-WantedBy=multi-user.target
-```
-Then: `sudo systemctl enable attendancebot && sudo systemctl start attendancebot`
+`_streaks` is a reserved key — date-parsing logic skips it via `is_date_key()`.
 
 ---
 
@@ -174,8 +156,19 @@ Then: `sudo systemctl enable attendancebot && sudo systemctl start attendancebot
 | `ANNOUNCE_CHANNEL_ID` | *(required)* | Text channel for announcements |
 | `VOICE_CHANNEL_ID` | *(required)* | Voice channel to monitor |
 | `STUDY_ROLE_NAME` | `study` | Role name to track (case-sensitive) |
+| `PING_ROLE_NAME` | `anh em cứu vớt tuong lai` | Role pinged in daily announcement |
 | `ANNOUNCE_HOUR` | `20` | Hour of daily announcement (24h format) |
 | `ANNOUNCE_MINUTE` | `0` | Minute of announcement |
-| `LATE_GRACE_MINUTES` | `15` | Minutes after announce time before marked late |
+| `LATE_GRACE_MINUTES` | `15` | Minutes after announce before marked late |
 | `TIMEZONE_OFFSET` | `7` | UTC offset (Vietnam = 7) |
-| `ATTENDANCE_FILE` | `attendance.json` | Path to data file |
+| `ATTENDANCE_FILE` | `data/attendance.json` | Path to data file |
+
+---
+
+## 🚂 Deploying on Railway
+
+1. Push this repo to GitHub
+2. Create a new Railway project → **Deploy from GitHub repo**
+3. Add all environment variables in **Variables** tab (no `.env` file needed on Railway)
+4. Railway auto-detects `Procfile` → runs `worker: python bot.py`
+5. The bot runs 24/7 — no sleep mode like Heroku free tier
