@@ -30,7 +30,8 @@ ATTENDANCE_FILE     = os.getenv("ATTENDANCE_FILE", "data/attendance.json")
 MIN_DURATION_SECONDS = 3600  # 1 hour minimum
 MAX_LEAVES           = 3     # maximum leave count before disqualification
 CHECKIN_EMOJI        = os.getenv("CHECKIN_EMOJI", "✅")  # react to announcement = present
-MONTHLY_AWARD_HOUR   = int(os.getenv("MONTHLY_AWARD_HOUR", 21))   # end-of-month praise time
+MONTHLY_AWARD_DAY    = int(os.getenv("MONTHLY_AWARD_DAY", 29))    # day of month to praise
+MONTHLY_AWARD_HOUR   = int(os.getenv("MONTHLY_AWARD_HOUR", 22))   # praise time (hour)
 MONTHLY_AWARD_MINUTE = int(os.getenv("MONTHLY_AWARD_MINUTE", 0))
 
 intents = discord.Intents.default()
@@ -311,8 +312,10 @@ async def monthly_award():
     now = local_now()
     if now.hour != MONTHLY_AWARD_HOUR or now.minute != MONTHLY_AWARD_MINUTE:
         return
-    # Fire only on the last day of the month
-    if (now + timedelta(days=1)).month == now.month:
+    # Fire on the configured day. If the month is shorter than that day
+    # (e.g. Feb has no 29th), fall back to the month's last day.
+    is_last_day = (now + timedelta(days=1)).month != now.month
+    if now.day != MONTHLY_AWARD_DAY and not (is_last_day and now.day < MONTHLY_AWARD_DAY):
         return
 
     guild = bot.get_guild(GUILD_ID)
