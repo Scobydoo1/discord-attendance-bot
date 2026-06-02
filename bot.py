@@ -893,6 +893,59 @@ async def slash_summary(interaction: discord.Interaction, days: int = 7):
 
 
 @bot.tree.command(
+    name="debug",
+    description="Kiểm tra cấu hình bot (channel, role, voice) — (admin)",
+    guild=GUILD_OBJ,
+)
+@app_commands.default_permissions(manage_messages=True)
+async def slash_debug(interaction: discord.Interaction):
+    guild = interaction.guild
+
+    def describe_channel(cid: int) -> str:
+        ch = guild.get_channel(cid)
+        if ch is None:
+            return f"`{cid}` → ❌ KHÔNG TÌM THẤY"
+        return f"`{cid}` → **{ch.name}** ({type(ch).__name__})"
+
+    ann_ch = guild.get_channel(ANNOUNCE_CHANNEL_ID)
+    vc     = guild.get_channel(VOICE_CHANNEL_ID)
+    study  = get_study_role(guild)
+    ping   = get_ping_role(guild)
+
+    is_voice = isinstance(vc, (discord.VoiceChannel, discord.StageChannel))
+    in_room  = [m.display_name for m in vc.members if not m.bot] if is_voice else []
+
+    lines = [
+        f"**ANNOUNCE_CHANNEL_ID:** {describe_channel(ANNOUNCE_CHANNEL_ID)}",
+        f"**VOICE_CHANNEL_ID:** {describe_channel(VOICE_CHANNEL_ID)}",
+        (
+            "✅ VOICE_CHANNEL_ID là kênh voice — theo dõi thời gian OK."
+            if is_voice else
+            "🔴 **VOICE_CHANNEL_ID KHÔNG phải kênh voice!** "
+            "Không thể theo dõi thời gian. Hãy đặt ID của **kênh voice** thật."
+        ),
+        "",
+        f"**STUDY_ROLE:** {study.name if study else '❌ KHÔNG TÌM THẤY'} "
+        f"({len(study.members) if study else 0} thành viên)",
+        f"**PING_ROLE:** {ping.name if ping else '❌ KHÔNG TÌM THẤY'}",
+        "",
+        f"🎧 **Đang trong phòng voice ({len(in_room)}):** "
+        + (", ".join(in_room) if in_room else "_không có ai_"),
+        f"🕗 **Giờ hiện tại (bot):** {local_now().strftime('%Y-%m-%d %H:%M:%S')} "
+        f"(UTC+{TIMEZONE_OFFSET})",
+        f"⏰ **Cửa sổ điểm danh mở:** {'CÓ' if is_within_attendance_window() else 'CHƯA'} "
+        f"(mở lúc {ANNOUNCE_HOUR:02d}:{ANNOUNCE_MINUTE:02d})",
+    ]
+
+    embed = discord.Embed(
+        title="🔧 Debug cấu hình Bot",
+        description="\n".join(lines),
+        color=discord.Color.red() if not is_voice else discord.Color.green(),
+    )
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+@bot.tree.command(
     name="topstreak",
     description="Xem bảng xếp hạng streak hiện tại của cả nhóm",
     guild=GUILD_OBJ,
