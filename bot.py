@@ -18,6 +18,8 @@ ANNOUNCE_CHANNEL_ID = int(os.getenv("ANNOUNCE_CHANNEL_ID", 0))
 VOICE_CHANNEL_ID    = int(os.getenv("VOICE_CHANNEL_ID", 0))
 STUDY_ROLE_NAME     = os.getenv("STUDY_ROLE_NAME", "study")
 PING_ROLE_NAME      = os.getenv("PING_ROLE_NAME", "anh em cứu vớt tuong lai")
+STUDY_ROLE_ID       = int(os.getenv("STUDY_ROLE_ID", 0))
+PING_ROLE_ID        = int(os.getenv("PING_ROLE_ID", 0))
 ANNOUNCE_HOUR       = int(os.getenv("ANNOUNCE_HOUR", 20))
 ANNOUNCE_MINUTE     = int(os.getenv("ANNOUNCE_MINUTE", 0))
 LATE_GRACE_MINUTES  = int(os.getenv("LATE_GRACE_MINUTES", 15))
@@ -43,6 +45,22 @@ active_voice_sessions: dict[str, float] = {}
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────
+
+def get_study_role(guild: discord.Guild):
+    """Resolve the study role by ID (preferred) then fall back to name."""
+    if STUDY_ROLE_ID:
+        role = guild.get_role(STUDY_ROLE_ID)
+        if role:
+            return role
+    return discord.utils.get(guild.roles, name=STUDY_ROLE_NAME)
+
+def get_ping_role(guild: discord.Guild):
+    """Resolve the ping role by ID (preferred) then fall back to name."""
+    if PING_ROLE_ID:
+        role = guild.get_role(PING_ROLE_ID)
+        if role:
+            return role
+    return discord.utils.get(guild.roles, name=PING_ROLE_NAME)
 
 def local_now() -> datetime:
     return datetime.now(timezone(timedelta(hours=TIMEZONE_OFFSET)))
@@ -83,7 +101,7 @@ def save_data():
 def ensure_today(guild: discord.Guild) -> str:
     key = today_key()
     if key not in attendance_data:
-        study_role = discord.utils.get(guild.roles, name=STUDY_ROLE_NAME)
+        study_role = get_study_role(guild)
         expected   = [str(m.id) for m in study_role.members if not m.bot] if study_role else []
         attendance_data[key] = {"expected": expected, "present": {}, "closed": False}
         save_data()
@@ -192,8 +210,8 @@ async def daily_announce():
 
     channel    = guild.get_channel(ANNOUNCE_CHANNEL_ID)
     vc         = guild.get_channel(VOICE_CHANNEL_ID)
-    study_role = discord.utils.get(guild.roles, name=STUDY_ROLE_NAME)
-    ping_role  = discord.utils.get(guild.roles, name=PING_ROLE_NAME)
+    study_role = get_study_role(guild)
+    ping_role  = get_ping_role(guild)
 
     if not channel:
         return
@@ -233,7 +251,7 @@ async def on_message(message: discord.Message):
         return
 
     member     = message.author
-    study_role = discord.utils.get(member.guild.roles, name=STUDY_ROLE_NAME)
+    study_role = get_study_role(member.guild)
     if not study_role or study_role not in member.roles:
         return
 
@@ -263,7 +281,7 @@ async def on_voice_state_update(
     if member.bot or member.guild.id != GUILD_ID:
         return
 
-    study_role = discord.utils.get(member.guild.roles, name=STUDY_ROLE_NAME)
+    study_role = get_study_role(member.guild)
     if not study_role or study_role not in member.roles:
         return
 
@@ -523,7 +541,7 @@ async def slash_unmark(interaction: discord.Interaction, member: discord.Member)
 @app_commands.default_permissions(manage_roles=True)
 async def slash_initdd(interaction: discord.Interaction):
     guild      = interaction.guild
-    study_role = discord.utils.get(guild.roles, name=STUDY_ROLE_NAME)
+    study_role = get_study_role(guild)
 
     if not study_role:
         await interaction.response.send_message(
@@ -582,7 +600,7 @@ async def slash_closedd(interaction: discord.Interaction):
 @app_commands.describe(days="Số ngày gần nhất (mặc định: 7)")
 async def slash_summary(interaction: discord.Interaction, days: int = 7):
     guild      = interaction.guild
-    study_role = discord.utils.get(guild.roles, name=STUDY_ROLE_NAME)
+    study_role = get_study_role(guild)
     members    = [m for m in study_role.members if not m.bot] if study_role else []
     keys       = sorted([k for k in attendance_data if is_date_key(k)], reverse=True)[:days]
 
