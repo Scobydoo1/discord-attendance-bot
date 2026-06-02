@@ -255,23 +255,18 @@ async def on_ready():
 
 # ── daily announcement ────────────────────────────────────────────────────────
 
-@tasks.loop(minutes=1)
-async def daily_announce():
-    now = local_now()
-    if now.hour != ANNOUNCE_HOUR or now.minute != ANNOUNCE_MINUTE:
-        return
+async def post_announcement(guild: discord.Guild):
+    """Post the study announcement, store its message id, and seed the reaction.
 
-    guild = bot.get_guild(GUILD_ID)
-    if not guild:
-        return
-
+    Returns the sent message, or None if it couldn't be posted.
+    """
     channel    = guild.get_channel(ANNOUNCE_CHANNEL_ID)
     vc         = guild.get_channel(VOICE_CHANNEL_ID)
     study_role = get_study_role(guild)
     ping_role  = get_ping_role(guild)
 
     if not channel:
-        return
+        return None
 
     key          = ensure_today(guild)
     vc_mention   = vc.mention if vc else "**phòng học**"
@@ -303,6 +298,25 @@ async def daily_announce():
         await msg.add_reaction(CHECKIN_EMOJI)
     except discord.HTTPException:
         pass
+    return msg
+
+
+@tasks.loop(minutes=1)
+async def daily_announce():
+    now = local_now()
+    if now.hour != ANNOUNCE_HOUR or now.minute != ANNOUNCE_MINUTE:
+        return
+
+    guild = bot.get_guild(GUILD_ID)
+    if not guild:
+        return
+
+    # Don't post twice if it already went out today
+    key = today_key()
+    if attendance_data.get(key, {}).get("announce_message_id"):
+        return
+
+    await post_announcement(guild)
 
 
 # ── monthly streak award ──────────────────────────────────────────────────────
@@ -825,6 +839,26 @@ async def slash_award(interaction: discord.Interaction):
 
 
 @bot.tree.command(
+    name="announce",
+    description="Đăng thông báo điểm danh ngay bây giờ (admin)",
+    guild=GUILD_OBJ,
+)
+@app_commands.default_permissions(manage_messages=True)
+async def slash_announce(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+    msg = await post_announcement(interaction.guild)
+    if msg is None:
+        await interaction.followup.send(
+            "❌ Không gửi được thông báo. Kiểm tra `ANNOUNCE_CHANNEL_ID`.", ephemeral=True
+        )
+        return
+    await interaction.followup.send(
+        f"✅ Đã đăng thông báo điểm danh. Mọi người thả {CHECKIN_EMOJI} để điểm danh!",
+        ephemeral=True,
+    )
+
+
+@bot.tree.command(
     name="ddhelp",
     description="Xem hướng dẫn sử dụng bot điểm danh",
     guild=GUILD_OBJ,
@@ -849,6 +883,7 @@ async def slash_ddhelp(interaction: discord.Interaction):
             "`/initdd` — Khởi tạo danh sách điểm danh hôm nay\n"
             "`/closedd` — Đóng điểm danh & cập nhật streak\n"
             "`/summary [số ngày]` — Tổng hợp tỉ lệ đi học\n"
+            "`/announce` — Đăng thông báo điểm danh ngay\n"
             "`/award` — Đăng vinh danh streak ngay"
         ),
         inline=False,
